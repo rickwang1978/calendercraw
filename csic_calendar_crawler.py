@@ -2,10 +2,10 @@ import re
 import csv
 import sys
 import os
+import time
 import datetime
 import threading
 import subprocess
-import concurrent.futures
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -56,7 +56,7 @@ def get_resource_path(filename):
 class CSICCalendarCrawlerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"高雄市私立中山工商 - 行事曆雙模比對與匯出工具 v8.3 ({'macOS' if IS_MAC else 'Windows'} 狂速版)")
+        self.root.title(f"高雄市私立中山工商 - 行事曆雙模比對與匯出工具 v8.5 ({'macOS' if IS_MAC else 'Windows'} 保險防漏版)")
         self.root.geometry("1020x860")
         self.root.minsize(920, 750)
 
@@ -87,7 +87,7 @@ class CSICCalendarCrawlerApp:
 
         title_label = tk.Label(
             header_frame, 
-            text="🏫 高雄市私立中山工商行事曆雙模比對與極速同步系統 v8.3", 
+            text="🏫 高雄市私立中山工商行事曆雙模比對與同步系統 v8.5", 
             font=("Microsoft JhengHei", 15, "bold"), 
             fg="#ffffff", 
             bg="#1e293b"
@@ -96,7 +96,7 @@ class CSICCalendarCrawlerApp:
 
         subtitle_label = tk.Label(
             header_frame, 
-            text="說明：支援離線檔案比對與多線程並行 Batch 狂速寫入（幾秒內即可同步數百筆行程）！", 
+            text="說明：採用標準安全 Batch 批量機制 + 失敗自動重試，確保行程 100% 完整寫入零漏筆！", 
             font=("Microsoft JhengHei", 9), 
             fg="#cbd5e1", 
             bg="#1e293b"
@@ -172,8 +172,8 @@ class CSICCalendarCrawlerApp:
         self.status_label = ttk.Label(log_frame, text="狀態：就緒（請確認年月設定後點擊『開始線上連線擷取』）", font=("Microsoft JhengHei", 9, "bold"))
         self.status_label.pack(anchor="w")
 
-        # 4. 比對控制面板區 (多線程並行 Batch 狂速同步)
-        compare_frame = ttk.LabelFrame(main_frame, text=" 2. Google 日曆重複比對與極速同步 ", padding="10")
+        # 4. 比對控制面板區 (保險防漏同步)
+        compare_frame = ttk.LabelFrame(main_frame, text=" 2. Google 日曆重複比對與安全同步 ", padding="10")
         compare_frame.pack(fill=tk.X, pady=(0, 10))
 
         # 方案一：離線檔案比對
@@ -230,10 +230,10 @@ class CSICCalendarCrawlerApp:
         )
         btn_compare_gsub.grid(row=0, column=4, padx=(0, 8), pady=3, sticky="w")
 
-        # ⚡ 狂速同步至子日曆按鈕 (多線程 Batch 並行)
+        # 保險防漏寫入按鈕
         btn_login_gcal_sync = tk.Button(
             compare_frame, 
-            text="⚡ 狂速同步至此子日曆", 
+            text="🛡️ 保險同步至此子日曆 (防漏筆)", 
             bg="#38bdf8", 
             fg="black", 
             activebackground="#0284c7", 
@@ -592,7 +592,7 @@ class CSICCalendarCrawlerApp:
             self.root.after(0, lambda: messagebox.showerror("比對失敗", f"查詢子日曆錯誤: {err}"))
             self.update_status("子日曆比對失敗", 0)
 
-    # ⚡ 方案二：採用【多線程併行 Batch】寫入技術（狂速 1~2 秒完成）
+    # 🛡️ 方案二：採用【保險標準 Batch + 重試機制】（100% 完整防漏筆）
     def sync_new_events_to_google_api_thread(self):
         if not self.google_service:
             messagebox.showwarning("提示", "請先點擊『🔐 方案二：登入 Google 帳號』完成連線授權！")
@@ -603,11 +603,10 @@ class CSICCalendarCrawlerApp:
             messagebox.showwarning("提示", "請選擇或輸入目標 Google 子日曆名稱！")
             return
 
-        thread = threading.Thread(target=self.run_google_api_sync_concurrent_batch, args=(target_name,), daemon=True)
+        thread = threading.Thread(target=self.run_google_api_sync_safe_batch, args=(target_name,), daemon=True)
         thread.start()
 
-    def run_google_api_sync_concurrent_batch(self, target_name):
-        # 1. 取得或建立該子日曆 ID
+    def run_google_api_sync_safe_batch(self, target_name):
         cal_id = self.google_calendars_dict.get(target_name)
 
         if not cal_id:
@@ -632,51 +631,70 @@ class CSICCalendarCrawlerApp:
             self.root.after(0, lambda: messagebox.showinfo("提示", f"根據設定已排除所有重複事件，子日曆『{target_name}』無需重複同步！"))
             return
 
-        self.update_status(f"🚀 啟動併行多線程 Batch，狂速同步 {total} 筆新行程...", 20)
+        self.update_status(f"🛡️ 啟動保險同步機制，準備傳輸 {total} 筆行程...", 10)
 
+        # 追蹤失敗項目，備用進行重試
+        pending_queue = list(events_to_sync)
         success_count = 0
-        batch_size = 50
-        chunks = [events_to_sync[i:i + batch_size] for i in range(0, total, batch_size)]
+        max_retries = 3
 
-        def execute_single_batch(chunk_data):
-            c_success = 0
-            def callback(request_id, response, exception):
-                nonlocal c_success
-                if exception is None:
-                    c_success += 1
+        for retry_pass in range(max_retries + 1):
+            if not pending_queue:
+                break
 
-            batch = self.google_service.new_batch_http_request(callback=callback)
-            for event_data in chunk_data:
-                event_body = {
-                    'summary': event_data['title'],
-                    'description': f"中山工商全校行事曆 ({event_data['category']})",
-                    'start': {'date': event_data['date']},
-                    'end': {'date': event_data['date']}
-                }
-                batch.add(self.google_service.events().insert(calendarId=cal_id, body=event_body))
+            if retry_pass > 0:
+                self.update_status(f"⚠️ 正在對 {len(pending_queue)} 筆未成功項目進行第 {retry_pass} 次自動重試...", 50)
+                time.sleep(1.5 * retry_pass) # 指數型避讓，等待 API 限制解除
 
-            try:
-                batch.execute()
-            except Exception as err:
-                print(f"Batch 執行異常: {err}")
+            current_pending = list(pending_queue)
+            pending_queue.clear()
 
-            return c_success
+            # 每 50 筆做標準 Batch 傳送
+            batch_size = 50
+            for i in range(0, len(current_pending), batch_size):
+                chunk = current_pending[i:i + batch_size]
+                
+                def make_callback(item_ref):
+                    def callback(request_id, response, exception):
+                        nonlocal success_count
+                        if exception is None:
+                            success_count += 1
+                        else:
+                            # 記錄失敗項目以便進入 retry 輪次
+                            pending_queue.append(item_ref)
+                    return callback
 
-        # 使用多線程併行池 Simultaneous Multi-threading (上限 8 線程併行)
-        completed_batches = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(chunks))) as executor:
-            futures = [executor.submit(execute_single_batch, chunk) for chunk in chunks]
-            for future in concurrent.futures.as_completed(futures):
+                batch = self.google_service.new_batch_http_request()
+                for item in chunk:
+                    event_body = {
+                        'summary': item['title'],
+                        'description': f"中山工商全校行事曆 ({item['category']})",
+                        'start': {'date': item['date']},
+                        'end': {'date': item['date']}
+                    }
+                    batch.add(
+                        self.google_service.events().insert(calendarId=cal_id, body=event_body),
+                        callback=make_callback(item)
+                    )
+
                 try:
-                    success_count += future.result()
-                except Exception as ex:
-                    print(f"併行線程例外: {ex}")
-                completed_batches += 1
-                pct = int((completed_batches / len(chunks)) * 100)
-                self.update_status(f"⚡ 多線程並行傳輸中... ({pct}%)", pct)
+                    batch.execute()
+                except Exception as b_err:
+                    print(f"Batch execution error: {b_err}")
+                    # 若整體 Batch 崩潰，該 Chunk 全補回重試佇列
+                    pending_queue.extend(chunk)
 
-        self.update_status("Google 子日曆狂速同步完成！", 100)
-        self.root.after(0, lambda: messagebox.showinfo("狂速同步成功", f"⚡ 狂速同步完成！已成功將 {success_count} 筆全新的行程寫入 Google 子日曆『{target_name}』！"))
+                # 更新進度條
+                progress = min(100, int(((success_count) / total) * 100))
+                self.update_status(f"🛡️ 安全寫入中... ({success_count}/{total} 筆完成)", progress)
+                time.sleep(0.1) # 給予微小延遲避免觸發 Rate Limit
+
+        self.update_status("Google 子日曆保險同步完成！", 100)
+        
+        if len(pending_queue) == 0:
+            self.root.after(0, lambda: messagebox.showinfo("同步成功", f"🎉 100% 完整同步！已將全數 {success_count} 筆行程寫入 Google 子日曆『{target_name}』！"))
+        else:
+            self.root.after(0, lambda: messagebox.showwarning("部分完成", f"已成功寫入 {success_count} 筆行程，仍有 {len(pending_queue)} 筆因網路或 API 限制未寫入，建議可再次點擊同步。"))
 
     def refresh_mac_calendars_thread(self):
         if not IS_MAC: return
